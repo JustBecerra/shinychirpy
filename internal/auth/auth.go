@@ -38,15 +38,15 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 }
 
 func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+	claims := jwt.MapClaims{}
+	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 		return []byte(tokenSecret), nil
 	})
 	if err != nil {
 		return uuid.Nil, err
 	}
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return uuid.Nil, errors.New("invalid token claims")
+	if !token.Valid {
+		return uuid.Nil, errors.New("invalid token")
 	}
 	return uuid.MustParse(claims["sub"].(string)), nil
 }
@@ -55,6 +55,9 @@ func GetBearerToken(headers http.Header) (string, error) {
 	bearerToken := headers.Get("Authorization")
 	if bearerToken == "" {
 		return "", errors.New("no bearer token provided")
+	}
+	if !strings.HasPrefix(bearerToken, "Bearer ") {
+		return "", errors.New("malformed authorization header")
 	}
 	return strings.TrimPrefix(bearerToken, "Bearer "), nil
 }

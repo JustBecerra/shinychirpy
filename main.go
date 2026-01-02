@@ -331,6 +331,16 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 		respondWithError(w, http.StatusBadRequest)
 		return
 	}
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
 
 	hashedPassword, err := auth.HashPassword(req.Password)
 	if err != nil {
@@ -340,7 +350,7 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	}
 
 	user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
-		ID:             uuid.MustParse(r.PathValue("userId")),
+		ID:             userID,
 		Email:          req.Email,
 		HashedPassword: hashedPassword,
 	})
@@ -427,6 +437,43 @@ func (cfg *apiConfig) handlerRevokeRefreshToken(w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (cfg *apiConfig) handlerDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	chirpID := r.PathValue("chirpID")
+	chirp, err := cfg.db.RetrieveSingleChirp(r.Context(), uuid.MustParse(chirpID))
+	if err != nil {
+		fmt.Println("Error retrieving chirp:", err)
+		respondWithError(w, http.StatusNotFound)
+		return
+	}
+
+	if chirp.UserID != userID {
+		respondWithError(w, http.StatusForbidden)
+		return
+	}
+
+	err = cfg.db.DeleteChirp(r.Context(), database.DeleteChirpParams{
+		ID:     uuid.MustParse(chirpID),
+		UserID: userID,
+	})
+	if err != nil {
+		fmt.Println("Error deleting chirp:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -455,9 +502,10 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirps)
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 	mux.HandleFunc("POST /api/login", cfg.handlerLoginUser)
-	mux.HandleFunc("PUT api/users", cfg.handlerUpdateUser)
+	mux.HandleFunc("PUT /api/users", cfg.handlerUpdateUser)
 	mux.HandleFunc("POST /api/refresh", cfg.handlerRefreshToken)
 	mux.HandleFunc("POST /api/revoke", cfg.handlerRevokeRefreshToken)
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", cfg.handlerDeleteChirp)
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	mux.Handle("/assets/logo", http.FileServer(http.Dir(".")))
 	server := &http.Server{

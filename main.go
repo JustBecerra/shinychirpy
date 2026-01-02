@@ -200,14 +200,14 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 	type loginUserRequest struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	type loginUserResponse struct {
 		User
-		Token string `json:"token"`
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -237,17 +237,31 @@ func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresInSeconds := req.ExpiresInSeconds
-	if expiresInSeconds == 0 {
-		expiresInSeconds = 3600 // Default to 1 hour
-	}
-	if expiresInSeconds > 3600 {
-		expiresInSeconds = 3600 // Cap at 1 hour
-	}
-
-	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, time.Duration(expiresInSeconds)*time.Second)
+	// Create access token with 1 hour expiration
+	accessToken, err := auth.MakeJWT(user.ID, cfg.tokenSecret, time.Hour)
 	if err != nil {
 		fmt.Println("Error creating JWT:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	// Create refresh token
+	refreshToken, err := auth.MakeRefreshToken()
+	if err != nil {
+		fmt.Println("Error creating refresh token:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	// Store refresh token in database with 60 days expiration
+	_, err = cfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token:     refreshToken,
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(60 * 24 * time.Hour), // 60 days
+		RevokedAt: sql.NullTime{},                      // NULL (not revoked)
+	})
+	if err != nil {
+		fmt.Println("Error storing refresh token:", err)
 		respondWithError(w, http.StatusInternalServerError)
 		return
 	}
@@ -259,7 +273,8 @@ func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: user.UpdatedAt,
 			Email:     user.Email,
 		},
-		Token: token,
+		Token:        accessToken,
+		RefreshToken: refreshToken,
 	})
 }
 
@@ -343,6 +358,75 @@ func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (cfg *apiConfig) handlerRefreshToken(w http.ResponseWriter, r *http.Request) {
+	// Get refresh token from Authorization header
+	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Look up the token in the database
+	refreshToken, err := cfg.db.RetrieveRefreshToken(r.Context(), refreshTokenString)
+	if err != nil {
+		fmt.Println("Error retrieving refresh token:", err)
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Check if token is expired
+	if time.Now().After(refreshToken.ExpiresAt) {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Check if token is revoked
+	if refreshToken.RevokedAt.Valid {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Create new access token
+	accessToken, err := auth.MakeJWT(refreshToken.UserID, cfg.tokenSecret, time.Hour)
+	if err != nil {
+		fmt.Println("Error creating JWT:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, map[string]string{
+		"token": accessToken,
+	})
+}
+
+func (cfg *apiConfig) handlerRevokeRefreshToken(w http.ResponseWriter, r *http.Request) {
+	// Get refresh token from Authorization header
+	refreshTokenString, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Check if token exists in the database
+	_, err = cfg.db.RetrieveRefreshToken(r.Context(), refreshTokenString)
+	if err != nil {
+		fmt.Println("Error retrieving refresh token:", err)
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	// Revoke the token in the database
+	err = cfg.db.RevokeRefreshToken(r.Context(), refreshTokenString)
+	if err != nil {
+		fmt.Println("Error revoking refresh token:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	// Respond with 204 No Content (no body)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
@@ -372,6 +456,8 @@ func main() {
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 	mux.HandleFunc("POST /api/login", cfg.handlerLoginUser)
 	mux.HandleFunc("PUT api/users", cfg.handlerUpdateUser)
+	mux.HandleFunc("POST /api/refresh", cfg.handlerRefreshToken)
+	mux.HandleFunc("POST /api/revoke", cfg.handlerRevokeRefreshToken)
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	mux.Handle("/assets/logo", http.FileServer(http.Dir(".")))
 	server := &http.Server{

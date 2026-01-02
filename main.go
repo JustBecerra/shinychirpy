@@ -21,6 +21,7 @@ type apiConfig struct {
 	fileserverHits atomic.Int32
 	db             *database.Queries
 	platform       string
+	tokenSecret    string
 }
 
 type User struct {
@@ -110,13 +111,24 @@ func respondWithError(w http.ResponseWriter, code int) {
 
 func (cfg *apiConfig) handlerCreateChirps(w http.ResponseWriter, r *http.Request) {
 	type createChirpRequest struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
+	}
+
+	userID, err := auth.ValidateJWT(token, cfg.tokenSecret)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized)
+		return
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	req := createChirpRequest{}
-	err := decoder.Decode(&req)
+	err = decoder.Decode(&req)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest)
 		return
@@ -129,7 +141,7 @@ func (cfg *apiConfig) handlerCreateChirps(w http.ResponseWriter, r *http.Request
 
 	chirp, err := cfg.db.CreateChirps(r.Context(), database.CreateChirpsParams{
 		Body:   req.Body,
-		UserID: req.UserID,
+		UserID: userID,
 	})
 	if err != nil {
 		fmt.Println("Error creating chirp:", err)
@@ -188,8 +200,14 @@ func (cfg *apiConfig) handlerCreateUser(w http.ResponseWriter, r *http.Request) 
 
 func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 	type loginUserRequest struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+
+	type loginUserResponse struct {
+		User
+		Token string `json:"token"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -219,11 +237,29 @@ func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, User{
-		ID:        user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email,
+	expiresInSeconds := req.ExpiresInSeconds
+	if expiresInSeconds == 0 {
+		expiresInSeconds = 3600 // Default to 1 hour
+	}
+	if expiresInSeconds > 3600 {
+		expiresInSeconds = 3600 // Cap at 1 hour
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.tokenSecret, time.Duration(expiresInSeconds)*time.Second)
+	if err != nil {
+		fmt.Println("Error creating JWT:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, loginUserResponse{
+		User: User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		},
+		Token: token,
 	})
 }
 
@@ -268,18 +304,59 @@ func (cfg *apiConfig) handlerRetrieveSingleChirp(w http.ResponseWriter, r *http.
 
 }
 
+func (cfg *apiConfig) handlerUpdateUser(w http.ResponseWriter, r *http.Request) {
+	type updateUserRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	req := updateUserRequest{}
+	err := decoder.Decode(&req)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := auth.HashPassword(req.Password)
+	if err != nil {
+		fmt.Println("Error hashing password:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	user, err := cfg.db.UpdateUser(r.Context(), database.UpdateUserParams{
+		ID:             uuid.MustParse(r.PathValue("userId")),
+		Email:          req.Email,
+		HashedPassword: hashedPassword,
+	})
+	if err != nil {
+		fmt.Println("Error updating user:", err)
+		respondWithError(w, http.StatusInternalServerError)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	})
+}
+
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	tokenSecret := os.Getenv("SECRET_TOKEN")
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Println("Error opening database:", err)
 	}
 	dbQueries := database.New(db)
 	cfg := &apiConfig{
-		db:       dbQueries,
-		platform: platform,
+		db:          dbQueries,
+		platform:    platform,
+		tokenSecret: tokenSecret,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -294,6 +371,7 @@ func main() {
 	mux.HandleFunc("POST /api/chirps", cfg.handlerCreateChirps)
 	mux.HandleFunc("POST /api/users", cfg.handlerCreateUser)
 	mux.HandleFunc("POST /api/login", cfg.handlerLoginUser)
+	mux.HandleFunc("PUT api/users", cfg.handlerUpdateUser)
 	mux.Handle("/app/", cfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 	mux.Handle("/assets/logo", http.FileServer(http.Dir(".")))
 	server := &http.Server{

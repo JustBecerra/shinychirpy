@@ -9,8 +9,11 @@ VALUES (
 )
 RETURNING *;
 
--- name: RetrieveChirpsAscOrder :many
-SELECT * FROM chirps ORDER BY created_at ASC;
+-- name: RetrieveChirps :many
+SELECT * FROM chirps;
+
+-- name: RetrieveChirpsByAuthorId :many
+SELECT * FROM chirps WHERE user_id = $1 ORDER BY created_at $2;
 
 -- name: RetrieveSingleChirp :one
 SELECT * FROM chirps WHERE id = $1 LIMIT 1;

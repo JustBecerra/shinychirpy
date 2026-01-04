@@ -55,12 +55,50 @@ func (q *Queries) DeleteChirp(ctx context.Context, arg DeleteChirpParams) error 
 	return err
 }
 
-const retrieveChirpsAscOrder = `-- name: RetrieveChirpsAscOrder :many
-SELECT id, created_at, updated_at, body, user_id FROM chirps ORDER BY created_at ASC
+const retrieveChirps = `-- name: RetrieveChirps :many
+SELECT id, created_at, updated_at, body, user_id FROM chirps
 `
 
-func (q *Queries) RetrieveChirpsAscOrder(ctx context.Context) ([]Chirp, error) {
-	rows, err := q.db.QueryContext(ctx, retrieveChirpsAscOrder)
+func (q *Queries) RetrieveChirps(ctx context.Context) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, retrieveChirps)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Chirp
+	for rows.Next() {
+		var i Chirp
+		if err := rows.Scan(
+			&i.ID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Body,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const retrieveChirpsByAuthorId = `-- name: RetrieveChirpsByAuthorId :many
+SELECT id, created_at, updated_at, body, user_id FROM chirps WHERE user_id = $1 ORDER BY created_at $2
+`
+
+type RetrieveChirpsByAuthorIdParams struct {
+	UserID  uuid.UUID
+	Column2 interface{}
+}
+
+func (q *Queries) RetrieveChirpsByAuthorId(ctx context.Context, arg RetrieveChirpsByAuthorIdParams) ([]Chirp, error) {
+	rows, err := q.db.QueryContext(ctx, retrieveChirpsByAuthorId, arg.UserID, arg.Column2)
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"shinychirpy/internal/auth"
 	"shinychirpy/internal/database"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -283,13 +284,15 @@ func (cfg *apiConfig) handlerLoginUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (cfg *apiConfig) handlerRetrieveChirpsAscOrder(w http.ResponseWriter, r *http.Request) {
-	dbChirps, err := cfg.db.RetrieveChirpsAscOrder(r.Context())
+	// Get all chirps from database (order doesn't matter since we'll sort in-memory)
+	dbChirps, err := cfg.db.RetrieveChirps(r.Context())
 	if err != nil {
 		fmt.Println("Error retrieving chirps:", err)
 		respondWithError(w, http.StatusInternalServerError)
 		return
 	}
 
+	// Convert to Chirp slice
 	chirps := make([]Chirp, len(dbChirps))
 	for i, dbChirp := range dbChirps {
 		chirps[i] = Chirp{
@@ -300,6 +303,18 @@ func (cfg *apiConfig) handlerRetrieveChirpsAscOrder(w http.ResponseWriter, r *ht
 			UserId:    dbChirp.UserID,
 		}
 	}
+
+	// Get sort query parameter, default to "asc"
+	sortParam := r.URL.Query().Get("sort")
+	isDesc := sortParam == "desc"
+
+	// Sort in-memory
+	sort.Slice(chirps, func(i, j int) bool {
+		if isDesc {
+			return chirps[i].CreatedAt.After(chirps[j].CreatedAt)
+		}
+		return chirps[i].CreatedAt.Before(chirps[j].CreatedAt)
+	})
 
 	respondWithJSON(w, http.StatusOK, chirps)
 }
